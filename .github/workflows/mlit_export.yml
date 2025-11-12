@@ -24,43 +24,47 @@ jobs:
       - name: Fetch MLIT data and build CSV
         run: |
           python - <<'PY'
-          import os, time, csv, json, gzip, io, requests, urllib.parse, sys
+          import os, time, csv, json, requests, urllib.parse, sys
 
           KEY = (os.environ.get("API_KEY") or "").strip()
           if not KEY:
               print("ERROR: MLIT_API_KEY (repo secret) is missing.", file=sys.stderr)
               sys.exit(1)
 
-          # 収集対象：2024Q3〜2025Q2（4期）× 全国（01〜47）
-          TARGETS = [(2024,3),(2024,4),(2025,1),(2025,2)]
-          AREAS = [f"{i:02d}" for i in range(1,48)]
+          # Collect data for quarters 2024Q3 through 2025Q2 across all prefectures
+          TARGETS = [(2024, 3), (2024, 4), (2025, 1), (2025, 2)]
+          AREAS = [f"{i:02d}" for i in range(1, 48)]
 
           COLS = [
-            "Prefecture","Municipality","DistrictName","Type",
-            "TradePrice","PricePerUnit","Area","UnitPrice",
-            "FloorPlan","TotalFloorArea","BuildingYear","Structure",
-            "Use","Purpose","Direction","Classification","Breadth",
-            "CityPlanning","CoverageRatio","FloorAreaRatio",
-            "Period","Renovation","Remarks",
-            "MunicipalityCode","Region"
+            "Prefecture", "Municipality", "DistrictName", "Type",
+            "TradePrice", "PricePerUnit", "Area", "UnitPrice",
+            "FloorPlan", "TotalFloorArea", "BuildingYear", "Structure",
+            "Use", "Purpose", "Direction", "Classification", "Breadth",
+            "CityPlanning", "CoverageRatio", "FloorAreaRatio",
+            "Period", "Renovation", "Remarks",
+            "MunicipalityCode", "Region"
           ]
 
           OUT = "MLIT_prices_2024Q3_2025Q2_allpref_alltypes.csv"
 
-          def http_get(url:str):
-              """通常はヘッダーで送信。401/403時のみ ?subscription-key= に自動フォールバック。
-                 ※ログにキーは出しません。"""
-              r = requests.get(url, headers={"Ocp-Apim-Subscription-Key": KEY}, timeout=120)
-              if r.status_code in (401,403):
-                  # 一部の環境向けフォールバック（Azure APIM互換）
+          def http_get(url: str):
+              """
+              Perform an HTTP GET request and return the status code and raw content.
+              If a 401 or 403 is encountered, fallback to a query parameter with subscription-key.
+              Gzip decompression is intentionally not performed here because requests
+              already handles gzip decompression when content-encoding is set.
+              """
+              resp = requests.get(url, headers={"Ocp-Apim-Subscription-Key": KEY}, timeout=120)
+              if resp.status_code in (401, 403):
                   url2 = url + ("&" if "?" in url else "?") + "subscription-key=" + urllib.parse.quote(KEY, safe="")
-                  r = requests.get(url2, timeout=120)
-              raw = r.content
-              if r.headers.get("content-encoding","").lower() == "gzip":
-                  raw = gzip.decompress(raw)
-              return r.status_code, raw
+                  resp = requests.get(url2, timeout=120)
+              return resp.status_code, resp.content
 
-          def fetch(year:int, quarter:int, area:str):
+          def fetch(year: int, quarter: int, area: str):
+              """
+              Fetch data for a given year/quarter/area combination.
+              Retries up to 3 times on transient errors (status 429/503) or JSON parse failures.
+              """
               url = f"https://www.reinfolib.mlit.go.jp/ex-api/external/XIT001?year={year}&quarter={quarter}&area={area}"
               for k in range(3):
                   sc, raw = http_get(url)
@@ -68,22 +72,25 @@ jobs:
                       try:
                           return json.loads(raw.decode("utf-8"))
                       except Exception:
-                          time.sleep(2*(k+1))
-                  elif sc in (429,503):
-                      time.sleep(2*(k+1))
+                          # If parsing fails, wait and retry
+                          time.sleep(2 * (k + 1))
+                  elif sc in (429, 503):
+                      # Rate limited or server busy; wait and retry
+                      time.sleep(2 * (k + 1))
                   else:
+                      # Other error codes: return empty list to skip
                       return []
               return []
 
           total = 0
           with open(OUT, "w", newline="", encoding="utf-8") as f:
-              w = csv.writer(f)
-              w.writerow(COLS)
-              for (y,q) in TARGETS:
+              writer = csv.writer(f)
+              writer.writerow(COLS)
+              for y, q in TARGETS:
                   for a in AREAS:
-                      arr = fetch(y,q,a) or []
-                      for r in arr:
-                          w.writerow([r.get(c,"") for c in COLS])
+                      data = fetch(y, q, a) or []
+                      for r in data:
+                          writer.writerow([r.get(c, "") for c in COLS])
                           total += 1
                       time.sleep(0.35)
 
@@ -103,4 +110,4 @@ jobs:
           name: mlit-csv-2024Q3-2025Q2
           path: |
             MLIT_prices_2024Q3_2025Q2_allpref_alltypes.csv
-            MLIT_prices_2024Q3_2025Q2_allpref_alltypes.zip
+            MLIT_prices_2024Q3_2025Q2_allpref_alltypes.zi
