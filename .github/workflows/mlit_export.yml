@@ -110,4 +110,4 @@ jobs:
           name: mlit-csv-2024Q3-2025Q2
           path: |
             MLIT_prices_2024Q3_2025Q2_allpref_alltypes.csv
-            MLIT_prices_2024Q3_2025Q2_allpref_alltypes.zi
+            MLIT_prices_2024Q3_2025Q2_allpref_alltypes.zip
