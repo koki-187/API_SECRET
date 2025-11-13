@@ -1,7 +1,12 @@
-name: MLIT Export 2024Q3-2025Q2
+name: MLIT Export JP 2024Q3-2025Q2
+
+# このGitHub Actionsワークフローは、国土交通省の不動産情報ライブラリAPIから
+# 2024年第3四半期〜2025年第2四半期の全国不動産取引価格情報および成約価格情報を取得し、
+# 日本語列名を持つ単一CSVにまとめて成果物としてアップロードします。
 
 on:
   workflow_dispatch:
+    # 手動トリガー専用
 
 jobs:
   fetch:
@@ -10,104 +15,144 @@ jobs:
     env:
       API_KEY: ${{ secrets.MLIT_API_KEY }}
     steps:
-      - name: Checkout
+      - name: チェックアウト
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Python のセットアップ
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: 必要なパッケージをインストール
         run: pip install requests
 
-      - name: Fetch MLIT data and build CSV
+      - name: 国土交通省データを取得してCSVを作成する
         run: |
           python - <<'PY'
           import os, time, csv, json, requests, urllib.parse, sys
 
-          KEY = (os.environ.get("API_KEY") or "").strip()
-          if not KEY:
-              print("ERROR: MLIT_API_KEY (repo secret) is missing.", file=sys.stderr)
-              sys.exit(1)
+          # 環境変数からAPIキー取得
+          api_key = (os.getenv("API_KEY") or "").strip()
+          if not api_key:
+            print("ERROR: MLIT_API_KEY が設定されていません", file=sys.stderr)
+            sys.exit(1)
 
-          # Collect data for quarters 2024Q3 through 2025Q2 across all prefectures
-          TARGETS = [(2024, 3), (2024, 4), (2025, 1), (2025, 2)]
-          AREAS = [f"{i:02d}" for i in range(1, 48)]
+          # 対象期間: 2024年Q3〜2025年Q2
+          targets = [
+              (2024, 3),
+              (2024, 4),
+              (2025, 1),
+              (2025, 2),
+          ]
+          # 47都道府県コード (01〜47)
+          areas = [f"{i:02d}" for i in range(1, 48)]
 
-          COLS = [
-            "Prefecture", "Municipality", "DistrictName", "Type",
-            "TradePrice", "PricePerUnit", "Area", "UnitPrice",
-            "FloorPlan", "TotalFloorArea", "BuildingYear", "Structure",
-            "Use", "Purpose", "Direction", "Classification", "Breadth",
-            "CityPlanning", "CoverageRatio", "FloorAreaRatio",
-            "Period", "Renovation", "Remarks",
-            "MunicipalityCode", "Region"
+          # CSV出力時の列名マッピング (英語キー -> 日本語列)
+          field_map = [
+              ("Prefecture", "都道府県"),
+              ("Municipality", "市区町村"),
+              ("DistrictName", "地区"),
+              ("Region", "地域"),
+              ("Type", "取引の種類"),
+              ("TradePrice", "取引価格"),
+              ("PricePerUnit", "坪単価"),
+              ("Area", "面積"),
+              ("UnitPrice", "単価"),
+              ("FloorPlan", "間取り"),
+              ("TotalFloorArea", "延床面積"),
+              ("BuildingYear", "建築年"),
+              ("Structure", "構造"),
+              ("Use", "用途"),
+              ("Purpose", "利用目的"),
+              ("Direction", "前面道路方位"),
+              ("Classification", "前面道路種類"),
+              ("Breadth", "前面道路幅員(m)"),
+              ("CityPlanning", "都市計画"),
+              ("CoverageRatio", "建蔽率(%)"),
+              ("FloorAreaRatio", "容積率(%)"),
+              ("Period", "取引時点"),
+              ("Renovation", "改装"),
+              ("Remarks", "備考"),
+              ("MunicipalityCode", "市区町村コード"),
           ]
 
-          OUT = "MLIT_prices_2024Q3_2025Q2_allpref_alltypes.csv"
+          output_filename = "不動産価格情報_2024Q3_2025Q2.csv"
 
-          def http_get(url: str):
-              """
-              Perform an HTTP GET request and return the status code and raw content.
-              If a 401 or 403 is encountered, fallback to a query parameter with subscription-key.
-              Gzip decompression is intentionally not performed here because requests
-              already handles gzip decompression when content-encoding is set.
-              """
-              resp = requests.get(url, headers={"Ocp-Apim-Subscription-Key": KEY}, timeout=120)
-              if resp.status_code in (401, 403):
-                  url2 = url + ("&" if "?" in url else "?") + "subscription-key=" + urllib.parse.quote(KEY, safe="")
-                  resp = requests.get(url2, timeout=120)
-              return resp.status_code, resp.content
-
-          def fetch(year: int, quarter: int, area: str):
-              """
-              Fetch data for a given year/quarter/area combination.
-              Retries up to 3 times on transient errors (status 429/503) or JSON parse failures.
-              """
-              url = f"https://www.reinfolib.mlit.go.jp/ex-api/external/XIT001?year={year}&quarter={quarter}&area={area}"
-              for k in range(3):
-                  sc, raw = http_get(url)
-                  if sc == 200:
-                      try:
-                          return json.loads(raw.decode("utf-8"))
-                      except Exception:
-                          # If parsing fails, wait and retry
-                          time.sleep(2 * (k + 1))
-                  elif sc in (429, 503):
-                      # Rate limited or server busy; wait and retry
-                      time.sleep(2 * (k + 1))
-                  else:
-                      # Other error codes: return empty list to skip
-                      return []
-              return []
+          def fetch_data(y, q, area):
+            """APIリクエストを実行し、データ配列を返す。401/403ではクエリパラメータ方式にフォールバック。"""
+            base_url = "https://www.reinfolib.mlit.go.jp/ex-api/external/XIT001"
+            url = f"{base_url}?year={y}&quarter={q}&area={area}"
+            # 3回まで試行
+            for attempt in range(3):
+              try:
+                resp = requests.get(url, headers={"Ocp-Apim-Subscription-Key": api_key}, timeout=60)
+              except Exception:
+                time.sleep(2 * (attempt + 1))
+                continue
+              if resp.status_code == 200:
+                try:
+                  data = resp.json()
+                except json.JSONDecodeError:
+                  time.sleep(2 * (attempt + 1))
+                  continue
+                # オブジェクトの場合はdataキーを抽出
+                if isinstance(data, dict):
+                  return data.get("data", [])
+                # 配列の場合はそのまま
+                return data
+              elif resp.status_code in (401, 403):
+                # ヘッダで認証失敗時はクエリにキーを付与して再試行
+                try:
+                  fallback_url = url + ("&" if "?" in url else "?") + "subscription-key=" + urllib.parse.quote(api_key, safe="")
+                  resp2 = requests.get(fallback_url, timeout=60)
+                except Exception:
+                  time.sleep(2 * (attempt + 1))
+                  continue
+                if resp2.status_code == 200:
+                  try:
+                    data = resp2.json()
+                  except json.JSONDecodeError:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                  if isinstance(data, dict):
+                    return data.get("data", [])
+                  return data
+              elif resp.status_code in (429, 503):
+                # レート制限やサーバ混雑時はリトライ
+                time.sleep(2 * (attempt + 1))
+                continue
+              else:
+                # その他のHTTPコードではデータなし
+                return []
+            return []
 
           total = 0
-          with open(OUT, "w", newline="", encoding="utf-8") as f:
-              writer = csv.writer(f)
-              writer.writerow(COLS)
-              for y, q in TARGETS:
-                  for a in AREAS:
-                      data = fetch(y, q, a) or []
-                      for r in data:
-                          writer.writerow([r.get(c, "") for c in COLS])
-                          total += 1
-                      time.sleep(0.35)
+          with open(output_filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([jp for _, jp in field_map])
+
+            for y, q in targets:
+              for area_code in areas:
+                records = fetch_data(y, q, area_code)
+                for record in records:
+                  # レコードが辞書でなければ無視
+                  if not isinstance(record, dict):
+                    continue
+                  row = [record.get(en, "") for en, _ in field_map]
+                  writer.writerow(row)
+                  total += 1
+                # 負荷軽減のため短い待ち時間を入れる
+                time.sleep(0.3)
 
           if total == 0:
-              print("ERROR: No records fetched. Check MLIT_API_KEY or API availability.", file=sys.stderr)
-              sys.exit(2)
-
-          print("OK: wrote", OUT, "records:", total)
+            print("ERROR: 取得データがありません。APIキーやAPI状態を確認してください。", file=sys.stderr)
+            sys.exit(2)
+          else:
+            print(f"SUCCESS: {total} 件のレコードを {output_filename} に出力しました")
           PY
 
-      - name: Zip CSV (optional)
-        run: zip -9 MLIT_prices_2024Q3_2025Q2_allpref_alltypes.zip MLIT_prices_2024Q3_2025Q2_allpref_alltypes.csv
-
-      - name: Upload artifact
+      - name: CSV成果物をアップロード
         uses: actions/upload-artifact@v4
         with:
-          name: mlit-csv-2024Q3-2025Q2
-          path: |
-            MLIT_prices_2024Q3_2025Q2_allpref_alltypes.csv
-            MLIT_prices_2024Q3_2025Q2_allpref_alltypes.zip
+          name: real-estate-data-jp-2024Q3-2025Q2
+          path: 不動産価格情報_2024Q3_2025Q2.csv
